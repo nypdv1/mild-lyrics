@@ -96,6 +96,7 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
         return ", ".join(dict.fromkeys(values(*keys)))
 
     row["title"] = first("TIT2", "title", "TITLE", "\xa9nam") or row["title"]
+    row["_id_artist"] = first("TPE1", "artist", "ARTIST", "\xa9ART") or row["artist"]   # the id keeps the first, as before
     row["artist"] = joined("TPE1", "artist", "ARTIST", "\xa9ART") or row["artist"]
     row["album"] = first("TALB", "album", "ALBUM", "\xa9alb")
     try:
@@ -207,20 +208,11 @@ class LocalLibrary(QObject):
                         rows.append(was)
 
         if pending:
-            with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
-                                    thread_name_prefix="local-tags") as pool:
-                jobs = {pool.submit(read_tags, p, self.art_dir): (p, mt)
-                        for p, mt in pending}
-                for job, (p, mt) in jobs.items():
-                    try:
-                        was = job.result()
-                    except Exception:
-                        was = {"path": str(p), "title": p.stem, "artist": "",
-                               "album": "", "ms": 0,
-                               "fmt": p.suffix[1:].upper(), "art": "", "n": 0,
-                               "_tags_v": TAGS_VERSION}
+            with ThreadPoolExecutor(max_workers=SCAN_WORKERS, thread_name_prefix="local-tags") as pool:
+                got = pool.map(lambda job: read_tags(job[0], self.art_dir), pending)
+                for (p, mt), was in zip(pending, got):         # read_tags never raises
                     was["mt"] = mt
-                    was["tid"] = _key(was["title"], was["artist"])
+                    was["tid"] = _key(was["title"], was.pop("_id_artist", was["artist"]))
                     known[str(p)] = was
                     rows.append(was)
         self._known = known

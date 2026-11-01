@@ -109,7 +109,8 @@ def _row_of(r: dict) -> dict:
             "uri": uri, "path": r.get("path", ""), "name": r.get("title", ""),
             "sub": r.get("artist", ""), "art": r.get("art", ""), "ms": (r.get("len") or 0) * 1000,
             "t": r.get("t", 0), "player": r.get("player", ""), "album": r.get("album", ""),
-            "artists": [{"name": a, "uri": ""} for a in PLG.artists_of(r.get("artist", ""))]}
+            "artists": [{"name": a, "uri": ""} for a in PLG.artists_of(r.get("artist", ""))],
+            **({"_track": r["_track"]} if r.get("_track") else {})}
 
 
 class Pages:
@@ -118,26 +119,40 @@ class Pages:
     cd_at = 0.0         # the countdown on screen: its release moment, and the second drawn
     cd_sec = 0
 
+    _local_idx: tuple = (None, -1, {}, {})
+
+    def _local_index(self) -> tuple[dict, dict]:
+        """The library by path and by (title, artist), tags' and file name's; kept per scan."""
+        tracks = getattr(self.lib, "tracks", None) or []
+        if self._local_idx[0] is not tracks or self._local_idx[1] != len(tracks):
+            by_path, by_name = {}, {}
+            for t in tracks:
+                path = str(t.get("path") or "")
+                if not path:
+                    continue
+                by_path[os.path.normcase(os.path.normpath(path))] = t
+                ft, fa = LP._from_name(pathlib.Path(path))
+                artist = str(t.get("artist") or "")
+                for ti, ar in ((t.get("title") or "", artist),
+                               (t.get("title") or "", artist.split(", ")[0]), (ft, fa)):
+                    by_name.setdefault((SS.norm(str(ti)), SS.norm(str(ar))), t)
+            self._local_idx = (tracks, len(tracks), by_path, by_name)
+        return self._local_idx[2], self._local_idx[3]
+
     def local_history(self, row: dict) -> dict:
-        tracks = getattr(self.lib, "tracks", ())
-        if not tracks or row.get("uri"):
+        """A play-log row with the library file it was: by path, else by title and artist."""
+        if row.get("uri"):
             return row
-        want_path = os.path.normcase(os.path.normpath(str(row.get("path") or "")))
-        title = str(row.get("title") or "").strip().casefold()
-        artist = str(row.get("artist") or "").strip().casefold()
+        by_path, by_name = self._local_index()
+        if not by_path:
+            return row
         found = None
-        for t in tracks:
-            path = str(t.get("path") or "")
-            if want_path and os.path.normcase(os.path.normpath(path)) == want_path:
-                found = t
-                break
-            tt = str(t.get("title") or "").strip().casefold()
-            ta = str(t.get("artist") or "").strip().casefold()
-            ft, fa = LP._from_name(pathlib.Path(path))
-            if title and title in {tt, ft.casefold()} \
-                    and (not artist or artist in {ta, fa.casefold()}):
-                found = t
-                break
+        if row.get("path"):
+            found = by_path.get(os.path.normcase(os.path.normpath(str(row["path"]))))
+        if found is None:
+            title, artist = SS.norm(row.get("title") or ""), SS.norm(row.get("artist") or "")
+            if title and (artist or row.get("player") == LP.APP):   # no artist: only our own plays
+                found = by_name.get((title, artist))
         if found is None:
             return row
         out = dict(row)
@@ -2730,20 +2745,8 @@ class Pages:
         self.v.update()
 
     def play_local(self, it: dict, ctx: list) -> None:
-        rows = [r for r in ctx if r.get("kind") == "local"]
-        if not rows:
-            rows = [it]
-        wanted = it.get("_track") or it
-        path = os.path.normcase(os.path.normpath(str(wanted.get("path") or "")))
-        selected = next((r for r in rows
-                         if r is it or r.get("_track") is wanted
-                         or (path and os.path.normcase(os.path.normpath(
-                             str((r.get("_track") or r).get("path") or ""))) == path)), rows[0])
-        raw = selected.get("_track") or selected
-        if raw.get("path"):
-            fresh = LP.read_tags(pathlib.Path(raw["path"]), self.lib.art_dir)
-            selected["_track"] = {**raw, **fresh}
-        self.play_stream(selected, rows)
+        rows = [r for r in ctx if r.get("kind") == "local"] or [it]
+        self.play_stream(it, rows)
 
     def play_by_name(self, title: str, artist: str) -> None:
         """A song known only by name: one of the local files, else where songs play (Spotify's
